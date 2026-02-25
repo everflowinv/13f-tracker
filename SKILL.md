@@ -5,12 +5,17 @@ description: Fetches SEC 13F institutional holdings and formats them into a spec
 # 13F Holdings Analyzer Skill
 
 ## Setup & Installation
-Before using this skill, it is HIGHLY RECOMMENDED to install dependencies in an isolated virtual environment to prevent version conflicts.
-1. Navigate to the skill directory: `cd skills/13f-tracker`
-2. Create and activate a virtual environment: 
-   `python3 -m venv venv && source venv/bin/activate`
-3. Install dependencies: `pip install -r requirements.txt`
-4. Set environment variable: `export EDGAR_IDENTITY="Your Name <your.email@example.com>"` (Required by SEC Edgar API to avoid rate limits/bans).
+
+⚠️ **CRITICAL: Installation Location**
+Do NOT install this skill in the global `node_modules` directory. You MUST clone/install it directly into your local OpenClaw workspace:
+1. Navigate to your workspace: `cd ~/.openclaw/workspace/skills/`
+2. Clone this repository: `git clone git@github.com:everflowinv/13f-tracker.git`
+
+**Configuration:**
+Set your SEC Edgar identity (Required by SEC API to avoid rate limits/bans):
+`export EDGAR_IDENTITY="Your Name <your.email@example.com>"`
+
+**That's it!** You do NOT need to manually install dependencies. The skill is fully auto-bootstrapping. The first time the Agent executes the `run.sh` command, it will automatically create an isolated virtual environment and install everything needed.
 
 ## When to use this skill
 Use this skill when a user asks about the stock portfolio changes, quarter-over-quarter comparisons, or specific holdings of an institutional investor.
