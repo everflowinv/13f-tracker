@@ -21,7 +21,8 @@ Set your SEC Edgar identity (Required by SEC API to avoid rate limits/bans):
 Use this skill when a user asks about the stock portfolio changes, quarter-over-quarter comparisons, or specific holdings of an institutional investor.
 
 ## How to use this skill
-Execute the `bash skills/13f-tracker/run.sh compare` command to get the raw data. Then, you MUST process the raw output EXACTLY according to the analytical steps below.
+⚠️ **AGENT INSTRUCTION: DO NOT write or execute your own Python code to fetch data. ** You MUST use your terminal/bash execution tool to run the following exact command:
+`bash skills/13f-tracker/run.sh compare` to get the raw data. Then, you MUST process the raw output EXACTLY according to the analytical steps below.
 
 ### Argument Mapping Rules
 - `--institution`: You MUST extract the institution's identifier. For non-public funds (like HHLR Advisors), proactively search for and use their CIK number. For public companies, use the Ticker.
