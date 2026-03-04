@@ -21,8 +21,24 @@ Set your SEC Edgar identity (Required by SEC API to avoid rate limits/bans):
 Use this skill when a user asks about the stock portfolio changes, quarter-over-quarter comparisons, or specific holdings of an institutional investor.
 
 ## How to use this skill
-⚠️ **AGENT INSTRUCTION: DO NOT write or execute your own Python code to fetch data. ** You MUST use your terminal/bash execution tool to run the following exact command:
-`bash skills/13f-tracker/run.sh compare` to get the raw data. Then, you MUST process the raw output EXACTLY according to the analytical steps below.
+⚠️ **AGENT INSTRUCTION: DO NOT write or execute your own Python code to fetch data.** You MUST use `run.sh` only.
+
+### 0) Health check first (mandatory)
+```bash
+bash skills/13f-tracker/run.sh self-test --institution 0001067983
+bash skills/13f-tracker/run.sh --json self-test --institution 0001067983
+```
+
+### 1) Fetch data (raw text mode)
+```bash
+bash skills/13f-tracker/run.sh compare --institution 0001762304 --offset 0
+```
+
+### 2) Fetch data (JSON mode, preferred for deterministic parsing)
+```bash
+bash skills/13f-tracker/run.sh --json compare --institution 0001762304 --offset 0
+```
+Then process the output EXACTLY according to the analytical steps below.
 
 ### Argument Mapping Rules
 - `--institution`: You MUST extract the institution's identifier. For non-public funds (like HHLR Advisors), proactively search for and use their CIK number. For public companies, use the Ticker.
@@ -68,6 +84,12 @@ You are strictly FORBIDDEN from inventing new phrases (Do NOT use "大幅减仓"
 - Place all CLOSED (清仓) positions at the very bottom of that group.
 - OUTPUT ONLY THE FINAL TEXT REPORT. Do not output your thinking process, do not apologize, do not explain your math.
 
+### Output Discipline (Mandatory, low-intelligence-safe)
+- Never invent institution mapping, holdings, or percentages.
+- If command returns error/hint, surface it directly and stop.
+- Prefer `--json` output for downstream parsing whenever possible.
+- In final narrative, only use values that appear in tool output.
+
 ### Execution Example
 User: "对比一下HHLR Advisors 25Q4和25Q3的持仓"
-Action: Run `python scripts/13f_skill.py compare --institution 0001762304 --offset 0` (Assuming 25Q4 is the latest available quarter, making the base offset 0).
+Action: Run `bash skills/13f-tracker/run.sh compare --institution 0001762304 --offset 0` (Assuming 25Q4 is the latest available quarter, making the base offset 0).
