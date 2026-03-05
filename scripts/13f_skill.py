@@ -641,11 +641,15 @@ def _build_report(comparison_rows: list, exclude_biotech: bool = True, auto_lear
         entry["chg_shares"] += chg
 
         # Calculate prev shares (prefer explicit PrevShares)
-        prev_shares_explicit = _safe_int(row.get("PrevShares") or row.get("Prev Shares") or row.get("prev_shares") or 0)
-        if prev_shares_explicit > 0:
-            entry["prev_shares"] += prev_shares_explicit
-        elif shares > 0 or chg != 0:
-            entry["prev_shares"] += max(0, shares - chg)
+        status = str(row.get("Status") or "").upper().strip()
+        if status == "NEW":
+            pass  # NEW position: prev_shares stays 0
+        else:
+            prev_shares_explicit = _safe_int(row.get("PrevShares") or row.get("Prev Shares") or row.get("prev_shares") or 0)
+            if prev_shares_explicit > 0:
+                entry["prev_shares"] += prev_shares_explicit
+            elif shares > 0 or chg != 0:
+                entry["prev_shares"] += max(0, shares - chg)
 
         # Try to get prev value
         prev_val = _safe_float(row.get("PrevValue") or row.get("Prev Value") or row.get("prev_value") or 0)
