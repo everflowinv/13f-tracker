@@ -20,6 +20,7 @@ pd.set_option("display.max_colwidth", None)
 SCRIPT_DIR = Path(__file__).resolve().parent
 TEMP_DIR = SCRIPT_DIR.parent / "temp"
 AUTO_LEARN_LOG = TEMP_DIR / "auto_learn_log.jsonl"
+PATCH_STORE = TEMP_DIR / "map_patches.json"
 
 # ---------------------------------------------------------------------------
 # Identity
@@ -61,6 +62,106 @@ def _append_auto_learn_log(kind: str, key: str, value: str, source: str, note: s
     }
     with open(AUTO_LEARN_LOG, "a", encoding="utf-8") as f:
         f.write(json.dumps(event, ensure_ascii=False) + "\n")
+
+
+def _load_patch_store() -> dict:
+    TEMP_DIR.mkdir(parents=True, exist_ok=True)
+    if PATCH_STORE.exists():
+        try:
+            with open(PATCH_STORE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {"patches": []}
+    return {"patches": []}
+
+
+def _save_patch_store(store: dict):
+    TEMP_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = PATCH_STORE.with_suffix(".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(store, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, PATCH_STORE)
+
+
+def _canon_category(label: str) -> str:
+    s = (label or "").strip().lower()
+    if s in ("china", "china book", "中国", "中概"):
+        return "China Book"
+    if s in ("ai", "ai/semi", "ai/semi/us saas", "tech", "科技"):
+        return "AI/Semi/US SaaS"
+    return "Other US Book"
+
+
+def _parse_map_instruction(instruction: str) -> list:
+    ops = []
+    text = (instruction or "").strip()
+    if not text:
+        return ops
+
+    chunks = [c.strip() for c in re.split(r"[;；\n]+", text) if c.strip()]
+    for ch in chunks:
+        # classify move: 把 XYZ 从 A 改到 B
+        m = re.search(r"把\s*([A-Za-z\.\-]{1,12})\s*从\s*(.+?)\s*改到\s*(.+)$", ch, re.IGNORECASE)
+        if m:
+            ticker = m.group(1).upper()
+            to_cat = _canon_category(m.group(3))
+            ops.append({"type": "classification", "ticker": ticker, "category": to_cat, "raw": ch})
+            continue
+
+        # classify set: XYZ 分类到 B / 归类到 B / 放到 B
+        m = re.search(r"([A-Za-z\.\-]{1,12})\s*(?:分类到|归类到|放到|属于)\s*(.+)$", ch, re.IGNORECASE)
+        if m:
+            ticker = m.group(1).upper()
+            cat = _canon_category(m.group(2))
+            ops.append({"type": "classification", "ticker": ticker, "category": cat, "raw": ch})
+            continue
+
+        # institution alias: 别名 hhlr 对应 0001762304 / hhlr -> 0001762304
+        m = re.search(r"(?:别名|机构)?\s*([^\s,，]+)\s*(?:对应|映射到|->|=>)\s*(\d{6,12})", ch, re.IGNORECASE)
+        if m:
+            alias = m.group(1).strip().lower()
+            cik = m.group(2)
+            ops.append({"type": "institution", "alias": alias, "cik": cik, "raw": ch})
+            continue
+
+        # merge two tickers -> canonical
+        m = re.search(r"(?:merge|合并)\s*([A-Za-z\.\-]{1,12})\s*[,，/]\s*([A-Za-z\.\-]{1,12})\s*(?:->|到|为)\s*([A-Za-z][A-Za-z\s\.\-&]{1,40})", ch, re.IGNORECASE)
+        if m:
+            t1, t2, name = m.group(1).upper(), m.group(2).upper(), m.group(3).strip()
+            ops.append({"type": "merge", "ticker": t1, "canonical": name, "raw": ch})
+            ops.append({"type": "merge", "ticker": t2, "canonical": name, "raw": ch})
+            continue
+
+        # single merge: GOOG -> Alphabet
+        m = re.search(r"([A-Za-z\.\-]{1,12})\s*(?:merge到|合并到|->|=>)\s*([A-Za-z][A-Za-z\s\.\-&]{1,40})", ch, re.IGNORECASE)
+        if m:
+            t, name = m.group(1).upper(), m.group(2).strip()
+            ops.append({"type": "merge", "ticker": t, "canonical": name, "raw": ch})
+            continue
+
+    return ops
+
+
+def _apply_ops(ops: list, source: str = "manual") -> list:
+    applied = []
+    for op in ops:
+        t = op.get("type")
+        if t == "classification":
+            ticker = op.get("ticker", "").upper()
+            category = _canon_category(op.get("category", "Other US Book"))
+            _learn_classification(ticker, category, source=source)
+            applied.append({"type": t, "ticker": ticker, "category": category})
+        elif t == "institution":
+            alias = op.get("alias", "").lower().strip()
+            cik = str(op.get("cik", "")).strip()
+            _learn_institution_alias(alias, cik, source=source)
+            applied.append({"type": t, "alias": alias, "cik": cik})
+        elif t == "merge":
+            ticker = op.get("ticker", "").upper().strip()
+            canonical = op.get("canonical", "").strip()
+            _learn_merge_rule(ticker, canonical, source=source)
+            applied.append({"type": t, "ticker": ticker, "canonical": canonical})
+    return applied
 
 
 _CLASSIFICATION = _load_json("classification.json")
@@ -654,6 +755,88 @@ def cmd_search(args):
                "hint": "Try a shorter name, or use CIK directly. Edit institution_map.json to add new entries."}, args.json)
 
 
+def cmd_map_show(args):
+    map_type = args.type
+    if map_type == "classification":
+        payload = _CLASSIFICATION
+    elif map_type == "institution":
+        payload = _INSTITUTION_MAP
+    elif map_type == "merge":
+        payload = _MERGE_RULES
+    else:
+        payload = {
+            "classification": _CLASSIFICATION,
+            "institution": _INSTITUTION_MAP,
+            "merge": _MERGE_RULES,
+        }
+
+    if args.key:
+        k = args.key.strip()
+        ku = k.upper()
+        kl = k.lower()
+        out = {
+            "classification": {
+                "china_book": ku in set(_CLASSIFICATION.get("china_book", [])),
+                "ai_semi_saas": ku in set(_CLASSIFICATION.get("ai_semi_saas", [])),
+                "other_us_book": ku in set(_CLASSIFICATION.get("other_us_book", [])),
+            },
+            "institution": _INSTITUTION_MAP.get(kl),
+            "merge": _MERGE_RULES.get(ku),
+        }
+        _emit({"ok": True, "key": k, "result": out}, args.json)
+        return
+
+    _emit({"ok": True, "type": map_type, "data": payload}, args.json)
+
+
+def cmd_map_propose(args):
+    ops = _parse_map_instruction(args.instruction)
+    if not ops:
+        _emit({"ok": False, "error": "No valid operations parsed from instruction.",
+               "hint": "示例：'把 CAIFY 从 AI 改到 Other'；'hhlr -> 0001762304'；'merge GOOG,GOOGL -> Alphabet'"}, args.json)
+        return
+
+    store = _load_patch_store()
+    patch_id = f"p{int(time.time())}"
+    patch = {
+        "id": patch_id,
+        "ts": datetime.now().isoformat(timespec="seconds"),
+        "instruction": args.instruction,
+        "operations": ops,
+        "status": "proposed",
+    }
+    store.setdefault("patches", []).append(patch)
+    _save_patch_store(store)
+
+    _emit({"ok": True, "patch_id": patch_id, "operations": ops}, args.json)
+
+
+def cmd_map_apply(args):
+    store = _load_patch_store()
+    patches = store.get("patches", [])
+    target = None
+    for p in patches:
+        if p.get("id") == args.patch_id:
+            target = p
+            break
+
+    if not target:
+        _emit({"ok": False, "error": f"Patch not found: {args.patch_id}"}, args.json)
+        return
+
+    if target.get("status") == "applied":
+        _emit({"ok": True, "patch_id": args.patch_id, "status": "already_applied", "applied": target.get("applied", [])}, args.json)
+        return
+
+    applied = _apply_ops(target.get("operations", []), source="manual-patch")
+    target["status"] = "applied"
+    target["applied"] = applied
+    target["applied_at"] = datetime.now().isoformat(timespec="seconds")
+    _save_patch_store(store)
+
+    _emit({"ok": True, "patch_id": args.patch_id, "status": "applied", "applied": applied}, args.json)
+
+
 def cmd_self_test(args):
     checks = []
     checks.append({"name": "env.EDGAR_IDENTITY", "ok": bool(os.environ.get("EDGAR_IDENTITY"))})
@@ -729,6 +912,23 @@ def main():
     p = sub.add_parser("search")
     p.add_argument("--query", required=True, help="Institution name to search")
     p.set_defaults(func=cmd_search)
+
+    # map-show
+    p = sub.add_parser("map-show")
+    p.add_argument("--type", choices=["classification", "institution", "merge", "all"], default="all")
+    p.add_argument("--key", default="", help="Optional key to inspect (ticker/alias)")
+    p.set_defaults(func=cmd_map_show)
+
+    # map-propose
+    p = sub.add_parser("map-propose")
+    p.add_argument("--instruction", required=True,
+                   help="Natural language instruction, e.g. '把 CAIFY 从 AI 改到 Other' or 'merge GOOG,GOOGL -> Alphabet'")
+    p.set_defaults(func=cmd_map_propose)
+
+    # map-apply
+    p = sub.add_parser("map-apply")
+    p.add_argument("--patch-id", required=True)
+    p.set_defaults(func=cmd_map_apply)
 
     # self-test
     p = sub.add_parser("self-test")

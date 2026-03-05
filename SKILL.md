@@ -122,9 +122,33 @@ bash skills/13f-tracker/run.sh --json search --query "hhlr"
 - 写入审计日志：`skills/13f-tracker/temp/auto_learn_log.jsonl`
 - 若要禁用自动学习：`--auto-learn false`
 
+## 7) 自然语言维护映射表（新增）
+
+先生成 patch（不直接改盘）：
+```bash
+bash skills/13f-tracker/run.sh --json map-propose --instruction "把 CAIFY 从 AI 改到 Other"
+```
+
+应用 patch：
+```bash
+bash skills/13f-tracker/run.sh --json map-apply --patch-id p1741140000
+```
+
+查看映射：
+```bash
+bash skills/13f-tracker/run.sh --json map-show --type all
+bash skills/13f-tracker/run.sh --json map-show --key CAIFY
+```
+
+支持的自然语言指令样式：
+- 分类：`把 XYZ 从 AI 改到 Other`
+- 分类：`XYZ 分类到 China`
+- 机构映射：`hhlr -> 0001762304`
+- 合并映射：`merge GOOG,GOOGL -> Alphabet`
+
 ---
 
-## 7) Agent Output Rule (very important)
+## 8) Agent Output Rule (very important)
 
 当用户要求固定格式报告时：
 1. 运行 `compare --format cn --json`
