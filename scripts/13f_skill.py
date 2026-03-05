@@ -229,6 +229,13 @@ def _learn_classification(ticker: str, category: str, source: str = "fallback"):
         print(f"WARNING: Rejected classification entry '{t}' — not a valid ticker format. "
               f"Use ticker symbols (e.g. 'DASH' not 'DOORDASH').", file=sys.stderr)
         return
+    # For manual/external sources, only accept tickers already seen in SEC data
+    known = _CHINA_TICKERS | _AI_SEMI_TICKERS | _OTHER_US_TICKERS
+    if source not in ("auto-fallback",) and t not in known:
+        print(f"WARNING: Rejected classification for unknown ticker '{t}'. "
+              f"Only SEC-sourced tickers are accepted. Run 'compare' first to auto-discover, "
+              f"or verify the ticker symbol is correct.", file=sys.stderr)
+        return
     key = _category_key(category)
     if key not in _CLASSIFICATION:
         _CLASSIFICATION[key] = []
