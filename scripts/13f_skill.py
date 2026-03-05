@@ -369,6 +369,20 @@ def _quarter_to_offset(quarter_str: str, company) -> int:
     raise RuntimeError(f"Could not find 13F filing for {quarter_str} (target period: {target_period}-*)")
 
 
+def _quarter_label(period_str: str) -> str:
+    """Convert '2025-09-30' or '2025-09' to '25Q3'."""
+    m = re.match(r"(\d{4})-(\d{2})", str(period_str))
+    if not m:
+        return ""
+    year = int(m.group(1)) % 100
+    month = int(m.group(2))
+    q_map = {3: 1, 6: 2, 9: 3, 12: 4}
+    q = q_map.get(month, 0)
+    if q == 0:
+        return ""
+    return f"{year}Q{q}"
+
+
 # ---------------------------------------------------------------------------
 # Biotech filter (#2)
 # ---------------------------------------------------------------------------
@@ -500,9 +514,12 @@ def _change_template(name: str, value: float, prev_shares: int, chg_shares: int,
 
     if prev_shares > 0:
         pct = round(abs(chg_shares) / prev_shares * 100)
+        if pct <= 2:
+            return f"{name}仓位几乎不变，{val_str}"
         if chg_shares > 0:
             if pct > 50:
-                return f"大幅加仓{name} {pct}%至{val_str}"
+                prev_val_str = _format_value(prev_value)
+                return f"大幅加仓{name}至{val_str}，之前持仓{prev_val_str}"
             else:
                 return f"加仓{name} {pct}%至{val_str}"
         else:
@@ -511,10 +528,61 @@ def _change_template(name: str, value: float, prev_shares: int, chg_shares: int,
     return f"{name}仓位不变，{val_str}"
 
 
+def _detect_action(prev_shares: int, chg_shares: int) -> str:
+    """Classify a position change into an action label."""
+    shares = prev_shares + chg_shares
+    if prev_shares == 0 and chg_shares > 0:
+        return "建仓"
+    if prev_shares > 0 and shares == 0:
+        return "清仓"
+    if chg_shares == 0 and prev_shares > 0:
+        return "不变"
+    if prev_shares > 0:
+        pct = round(abs(chg_shares) / prev_shares * 100)
+        if pct <= 2:
+            return "几乎不变"
+        if chg_shares > 0:
+            return "大幅加仓" if pct > 50 else "加仓"
+        else:
+            return "减仓"
+    return "不变"
+
+
+def _extract_actions(comparison_rows: list, exclude_biotech: bool = True) -> dict:
+    """Extract per-company action from comparison rows. Returns {merge_key: action_str}."""
+    merged = {}
+    for row in comparison_rows:
+        ticker = str(row.get("Ticker") or row.get("ticker") or "").upper().strip()
+        issuer = str(row.get("Issuer") or row.get("issuer") or "")
+        if exclude_biotech and _is_biotech(ticker, issuer):
+            continue
+        canonical = _MERGE_RULES.get(ticker)
+        merge_key = canonical or _short_name(issuer, ticker)
+        if merge_key not in merged:
+            merged[merge_key] = {"shares": 0, "prev_shares": 0, "chg_shares": 0}
+        entry = merged[merge_key]
+        shares = _safe_int(row.get("SharesPrnAmount") or row.get("Shares") or row.get("shares") or 0)
+        chg = _safe_int(row.get("ShareChange") or row.get("Chg") or row.get("chg") or row.get("Change") or 0)
+        entry["shares"] += shares
+        entry["chg_shares"] += chg
+        prev_explicit = _safe_int(row.get("PrevShares") or row.get("Prev Shares") or row.get("prev_shares") or 0)
+        if prev_explicit > 0:
+            entry["prev_shares"] += prev_explicit
+        elif shares > 0 or chg != 0:
+            entry["prev_shares"] += max(0, shares - chg)
+
+    result = {}
+    for key, e in merged.items():
+        e["chg_shares"] = e["shares"] - e["prev_shares"]
+        result[key] = _detect_action(e["prev_shares"], e["chg_shares"])
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Core: build formatted report (#1)
 # ---------------------------------------------------------------------------
-def _build_report(comparison_rows: list, exclude_biotech: bool = True, auto_learn: bool = True) -> dict:
+def _build_report(comparison_rows: list, exclude_biotech: bool = True, auto_learn: bool = True,
+                   prior_actions: dict | None = None, prev_quarter_label: str = "") -> dict:
     """Process comparison rows into categorized, formatted report."""
 
     # Auto-learn merge rules from class share names (safe heuristic)
@@ -590,6 +658,7 @@ def _build_report(comparison_rows: list, exclude_biotech: bool = True, auto_lear
     categories = {"China Book": [], "AI/Semi/US SaaS": [], "Other US Book": []}
 
     for entry in merged.values():
+        entry["chg_shares"] = entry["shares"] - entry["prev_shares"]
         cat = entry["category"]
         if cat not in categories:
             cat = "Other US Book"
@@ -601,9 +670,20 @@ def _build_report(comparison_rows: list, exclude_biotech: bool = True, auto_lear
             entry["prev_value"]
         )
 
+        # Prepend prior-quarter trend context if available
+        if prior_actions and prev_quarter_label:
+            cur_action = _detect_action(entry["prev_shares"], entry["chg_shares"])
+            prior_act = prior_actions.get(entry["name"], "")
+            if cur_action in ("加仓", "大幅加仓") and prior_act in ("建仓", "加仓", "大幅加仓"):
+                prior_label = "建仓" if prior_act == "建仓" else "加仓"
+                text = f"继{prev_quarter_label}{prior_label}后，继续" + text
+            elif cur_action == "减仓" and prior_act == "减仓":
+                text = f"继{prev_quarter_label}减仓后，继续" + text
+
         categories[cat].append({
             "text": text,
             "value": entry["value"],
+            "prev_value": entry["prev_value"],
             "is_closed": is_closed,
             "name": entry["name"],
             "ticker": entry["ticker"],
@@ -612,14 +692,14 @@ def _build_report(comparison_rows: list, exclude_biotech: bool = True, auto_lear
             "chg_shares": entry["chg_shares"],
         })
 
-    # Sort: active positions by value desc, closed at bottom
+    # Sort: active positions by value desc, closed by prev_value desc at bottom
     report_lines = []
     for cat_name in ["China Book", "AI/Semi/US SaaS", "Other US Book"]:
         items = categories[cat_name]
         if not items:
             continue
         active = sorted([i for i in items if not i["is_closed"]], key=lambda x: -x["value"])
-        closed = [i for i in items if i["is_closed"]]
+        closed = sorted([i for i in items if i["is_closed"]], key=lambda x: -x["prev_value"])
         report_lines.append(f"\n**{cat_name}**")
         for item in active + closed:
             report_lines.append(f"- {item['text']}")
@@ -726,9 +806,36 @@ def cmd_compare(args):
         "raw_text": str(comparison),
     }
 
+    # Fetch prior quarter comparison for trend context
+    prior_actions = {}
+    prev_quarter_label = ""
+    try:
+        prev_offset = offset + 1
+        filings = company.get_filings(form="13F-HR")
+        if prev_offset < len(filings):
+            prev_thirteenf = _retry(lambda: filings[prev_offset].obj())
+            prev_quarter_label = _quarter_label(str(prev_thirteenf.report_period))
+            prev_comparison = _retry(lambda: prev_thirteenf.compare_holdings())
+            prev_rows = []
+            try:
+                pdf = getattr(prev_comparison, "data", None)
+                if isinstance(pdf, pd.DataFrame) and not pdf.empty:
+                    prev_rows = pdf.to_dict(orient="records")
+                elif hasattr(prev_comparison, "to_pandas"):
+                    pdf2 = prev_comparison.to_pandas()
+                    if isinstance(pdf2, pd.DataFrame) and not pdf2.empty:
+                        prev_rows = pdf2.to_dict(orient="records")
+            except Exception:
+                pass
+            if prev_rows:
+                prior_actions = _extract_actions(prev_rows, exclude_biotech=not args.include_biotech)
+    except Exception:
+        pass
+
     # Build report (also triggers auto-learn), only expose formatted text in cn mode
     if rows and (args.format == "cn" or _auto_learn(args)):
-        report = _build_report(rows, exclude_biotech=not args.include_biotech, auto_learn=_auto_learn(args))
+        report = _build_report(rows, exclude_biotech=not args.include_biotech, auto_learn=_auto_learn(args),
+                               prior_actions=prior_actions, prev_quarter_label=prev_quarter_label)
         if args.format == "cn":
             result["formatted_report"] = report["report_text"]
             result["categories"] = report["categories"]
