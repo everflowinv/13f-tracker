@@ -139,6 +139,15 @@ def _parse_map_instruction(instruction: str) -> list:
             ops.append({"type": "merge", "ticker": t, "canonical": name, "raw": ch})
             continue
 
+        # ticker alias: alias XRS -> TAL / XRS 别名 TAL / XRS 实际是 TAL
+        m = re.search(r"(?:alias|别名|实际是|就是|映射)\s*([A-Za-z\.\-]{1,6})\s*(?:->|=>|→|到|为)\s*([A-Za-z\.\-]{1,6})", ch, re.IGNORECASE)
+        if not m:
+            m = re.search(r"([A-Za-z\.\-]{1,6})\s*(?:别名|实际是|就是|映射到)\s*([A-Za-z\.\-]{1,6})", ch, re.IGNORECASE)
+        if m:
+            sec_t, cls_t = m.group(1).upper(), m.group(2).upper()
+            ops.append({"type": "alias", "sec_ticker": sec_t, "classification_ticker": cls_t, "raw": ch})
+            continue
+
     return ops
 
 
@@ -161,6 +170,11 @@ def _apply_ops(ops: list, source: str = "manual") -> list:
             canonical = op.get("canonical", "").strip()
             _learn_merge_rule(ticker, canonical, source=source)
             applied.append({"type": t, "ticker": ticker, "canonical": canonical})
+        elif t == "alias":
+            sec_t = op.get("sec_ticker", "").upper().strip()
+            cls_t = op.get("classification_ticker", "").upper().strip()
+            _learn_ticker_alias(sec_t, cls_t, source=source)
+            applied.append({"type": t, "sec_ticker": sec_t, "classification_ticker": cls_t})
     return applied
 
 
@@ -168,6 +182,7 @@ _CLASSIFICATION = _load_json("classification.json")
 _MERGE_RULES = _load_json("merge_rules.json")
 _INSTITUTION_MAP = _load_json("institution_map.json")
 _NAME_TO_TICKER = _load_json("name_to_ticker.json")  # reverse lookup: uppercase name/issuer -> ticker
+_TICKER_ALIASES = _load_json("ticker_aliases.json")   # SEC ticker -> classification ticker
 
 _CHINA_TICKERS = set(_CLASSIFICATION.get("china_book", []))
 _AI_SEMI_TICKERS = set(_CLASSIFICATION.get("ai_semi_saas", []))
@@ -253,6 +268,22 @@ def _resolve_ticker(input_str: str) -> str:
     if len(candidates) == 1:
         return candidates[0][1]
     return s
+
+
+def _learn_ticker_alias(sec_ticker: str, classification_ticker: str, source: str = "auto"):
+    """Record SEC ticker → classification ticker alias (e.g. XRS → TAL)."""
+    s = (sec_ticker or "").upper().strip()
+    c = (classification_ticker or "").upper().strip()
+    if not s or not c or s == c or s.startswith("_"):
+        return
+    if not _is_valid_ticker(s) or not _is_valid_ticker(c):
+        return
+    if _TICKER_ALIASES.get(s) == c:
+        return
+    _TICKER_ALIASES[s] = c
+    _save_json("ticker_aliases.json", _TICKER_ALIASES)
+    _append_auto_learn_log("ticker_alias", s, c, source, f"SEC ticker {s} → classification ticker {c}")
+    print(f"INFO: Auto-learned ticker alias: {s} → {c}", file=sys.stderr)
 
 
 def _is_valid_ticker(s: str) -> bool:
@@ -461,8 +492,12 @@ def _is_biotech(ticker: str, issuer: str) -> bool:
 # ---------------------------------------------------------------------------
 def _classify(ticker: str, issuer: str = "", auto_learn: bool = True) -> str:
     t = (ticker or "").upper()
-    # Check merge rules first
-    canonical = _MERGE_RULES.get(t, _MERGE_RULES.get(ticker, ""))
+
+    # 1) Resolve ticker alias from ticker_aliases.json (SEC ticker -> common ticker)
+    resolved = _TICKER_ALIASES.get(t, t)
+
+    # 2) Check merge rules first — find any sibling in a classification bucket
+    canonical = _MERGE_RULES.get(resolved, _MERGE_RULES.get(t, ""))
     if canonical:
         for k, v in _MERGE_RULES.items():
             if v == canonical and k.upper() in _CHINA_TICKERS:
@@ -470,12 +505,32 @@ def _classify(ticker: str, issuer: str = "", auto_learn: bool = True) -> str:
             if v == canonical and k.upper() in _AI_SEMI_TICKERS:
                 return "AI/Semi/US SaaS"
 
-    if t in _CHINA_TICKERS:
-        return "China Book"
-    if t in _AI_SEMI_TICKERS:
-        return "AI/Semi/US SaaS"
+    # 3) Direct lookup — check resolved alias first, then original SEC ticker
+    all_classified = _CHINA_TICKERS | _AI_SEMI_TICKERS | _OTHER_US_TICKERS
+    for check_t in (resolved, t):
+        if check_t in _CHINA_TICKERS:
+            return "China Book"
+        if check_t in _AI_SEMI_TICKERS:
+            return "AI/Semi/US SaaS"
+        if check_t in _OTHER_US_TICKERS:
+            return "Other US Book"
 
-    # Fallback classifier + auto-learn
+    # 4) Auto-detect alias: if SEC ticker not classified, but issuer name maps to a
+    #    known classified ticker via name_to_ticker.json, auto-learn the alias
+    if auto_learn and t and t not in all_classified:
+        issuer_upper = (issuer or "").upper().strip()
+        candidate = _NAME_TO_TICKER.get(issuer_upper, "")
+        if candidate and candidate != t and candidate in all_classified:
+            _learn_ticker_alias(t, candidate, source="auto-issuer-match")
+            # Now classify using the discovered alias
+            if candidate in _CHINA_TICKERS:
+                return "China Book"
+            if candidate in _AI_SEMI_TICKERS:
+                return "AI/Semi/US SaaS"
+            if candidate in _OTHER_US_TICKERS:
+                return "Other US Book"
+
+    # 5) Fallback classifier + auto-learn
     category = _infer_category_fallback(t, issuer)
     if auto_learn and t:
         _learn_classification(t, category, source="auto-fallback")
@@ -543,9 +598,8 @@ def _short_name(issuer: str, ticker: str) -> str:
 # Value formatting (#1 Step 3)
 # ---------------------------------------------------------------------------
 def _format_value(value: float) -> str:
-    """Format value in Chinese convention. SEC 13F Value is in $1,000 units."""
-    # Convert from SEC $1,000 units to actual USD
-    actual = value * 1000
+    """Format value in Chinese convention. edgartools returns Value in actual USD."""
+    actual = value
     if actual >= 100_000_000:
         yi = actual / 100_000_000
         return f"{yi:.1f}亿美元"
@@ -967,11 +1021,14 @@ def cmd_map_show(args):
         payload = _INSTITUTION_MAP
     elif map_type == "merge":
         payload = _MERGE_RULES
+    elif map_type == "alias":
+        payload = _TICKER_ALIASES
     else:
         payload = {
             "classification": _CLASSIFICATION,
             "institution": _INSTITUTION_MAP,
             "merge": _MERGE_RULES,
+            "ticker_aliases": _TICKER_ALIASES,
         }
 
     if args.key:
@@ -986,6 +1043,7 @@ def cmd_map_show(args):
             },
             "institution": _INSTITUTION_MAP.get(kl),
             "merge": _MERGE_RULES.get(ku),
+            "alias": _TICKER_ALIASES.get(ku),
         }
         _emit({"ok": True, "key": k, "result": out}, args.json)
         return
@@ -1047,6 +1105,7 @@ def cmd_self_test(args):
     checks.append({"name": "classification.json", "ok": bool(_CLASSIFICATION)})
     checks.append({"name": "merge_rules.json", "ok": bool(_MERGE_RULES)})
     checks.append({"name": "institution_map.json", "ok": bool(_INSTITUTION_MAP)})
+    checks.append({"name": "ticker_aliases.json", "ok": isinstance(_TICKER_ALIASES, dict)})
 
     try:
         company = _resolve_institution(args.institution, auto_learn=False)
@@ -1119,7 +1178,7 @@ def main():
 
     # map-show
     p = sub.add_parser("map-show")
-    p.add_argument("--type", choices=["classification", "institution", "merge", "all"], default="all")
+    p.add_argument("--type", choices=["classification", "institution", "merge", "alias", "all"], default="all")
     p.add_argument("--key", default="", help="Optional key to inspect (ticker/alias)")
     p.set_defaults(func=cmd_map_show)
 

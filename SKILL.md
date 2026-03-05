@@ -31,7 +31,7 @@ bash skills/13f-tracker/run.sh --json self-test --institution 0001067983
 bash skills/13f-tracker/run.sh --json compare --institution HHLR --quarter 25Q4 --format cn
 ```
 - `--quarter 25Q4` 等同于 `--offset 0`（如果 25Q4 是最新季度）
-- 输出的 `formatted_report` 字段就是完整中文报告，直接贴给用户
+- 输出的 `formatted_report` 字段就是完整中文报告，**直接贴给用户，不做任何修改**
 
 ### B) 原始数据模式
 ```bash
@@ -95,6 +95,22 @@ bash skills/13f-tracker/run.sh --json search --query "aspex"
 - 如果公司名无法解析，系统会拒绝写入并提示先运行 compare
 - **不要**手动编辑 classification.json 写入公司全名
 
+### ⚠️ Ticker Alias 机制（重要）
+某些公司的 SEC filing ticker 与常用 ticker 不同（如 TAL Education 在 SEC 中为 `XRS`，但用户习惯用 `TAL`）。
+
+**`scripts/ticker_aliases.json`** 解决此问题：
+```json
+{
+  "XRS": "TAL",
+  "FB": "META"
+}
+```
+- **键** = SEC filing 中使用的 ticker
+- **值** = classification.json 中用户设定的 ticker
+- 分类时先查 alias → 用解析后的 ticker 查分类
+- **Auto-learn**：compare 时如果 SEC ticker 未分类，但 issuer name 能通过 `name_to_ticker.json` 关联到已分类 ticker，自动写入 alias
+- 手动维护：`map-propose --instruction "alias XRS -> TAL"`
+
 ---
 
 ## 5) 维护映射表
@@ -115,10 +131,13 @@ bash skills/13f-tracker/run.sh --json map-apply --patch-id p1741140000
 - `Coupang 归类到 Other` → 自动识别为 CPNG
 - `hhlr -> 0001762304`（机构别名）
 - `merge GOOG,GOOGL -> Alphabet`（合并 share class）
+- `alias XRS -> TAL`（SEC ticker 别名）
+- `XRS 实际是 TAL`（中文写法）
 
 ### 查看映射
 ```bash
 bash skills/13f-tracker/run.sh --json map-show --type all
+bash skills/13f-tracker/run.sh --json map-show --type alias
 bash skills/13f-tracker/run.sh --json map-show --type classification --key DASH
 ```
 
@@ -131,6 +150,7 @@ bash skills/13f-tracker/run.sh --json map-show --type classification --key DASH
 - 新机构别名 → 写入 `institution_map.json`
 - Share class 关系 → 写入 `merge_rules.json`
 - 公司名→ticker 映射 → 写入 `name_to_ticker.json`
+- **SEC ticker 别名** → 写入 `ticker_aliases.json`（当 SEC ticker 与已分类 ticker 不一致时）
 - 审计日志 → `temp/auto_learn_log.jsonl`
 
 关闭：`--auto-learn false`
@@ -194,8 +214,9 @@ bash skills/13f-tracker/run.sh --json search --query "aspex"
 1. 运行 `compare --format cn --json`
 2. **直接使用 `formatted_report` 字段**作为最终回复
 3. 可在报告前加 1 行上下文（如机构名和季度），**不要修改报告内容**
-4. **不要**重新计算百分比、改动措辞、重排顺序
-5. 若 `ok=false`，返回 `error + hint`
+4. **不要**重新计算百分比、改动措辞、重排顺序、重新分类
+5. **不要**根据自己的判断把公司从一个类别移到另一个——分类完全由代码决定
+6. 若 `ok=false`，返回 `error + hint`
 
 ### 示例回复格式
 ```
@@ -206,3 +227,23 @@ Aspex Management 25Q4 vs 25Q3：
 - PDD仓位几乎不变，3.5亿美元
 ...
 ```
+
+### ❌ 禁止的行为
+- ❌ 把 `formatted_report` 中 China Book 下的公司移到 AI/Semi（代码已正确分类）
+- ❌ 修改金额数字（如把"4.5亿"改成"4.50亿"）
+- ❌ 重新排序（代码按持仓市值降序排列）
+- ❌ 添加自己的分析评论到报告条目中
+- ❌ 省略任何条目
+
+---
+
+## 11) 数据文件清单
+
+| 文件 | 用途 | 维护方式 |
+|------|------|---------|
+| `scripts/classification.json` | ticker → 三大类别 | auto-learn + map-propose |
+| `scripts/institution_map.json` | 机构别名 → CIK | auto-learn + map-propose |
+| `scripts/merge_rules.json` | share class 合并 | auto-learn + map-propose |
+| `scripts/name_to_ticker.json` | 公司名 → SEC ticker | auto-learn (compare 时) |
+| `scripts/ticker_aliases.json` | SEC ticker → 分类用 ticker | auto-learn + map-propose |
+| `temp/auto_learn_log.jsonl` | 所有 auto-learn 审计日志 | 自动追加 |
