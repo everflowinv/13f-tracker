@@ -27,7 +27,7 @@ bash skills/13f-tracker/run.sh --json self-test --institution 0001067983
 
 ### A) 固定格式报告（推荐）
 ```bash
-bash skills/13f-tracker/run.sh --json compare --institution 0001762304 --offset 0 --format cn
+bash skills/13f-tracker/run.sh --json compare --institution 0001762304 --offset 0 --format cn --auto-learn true
 ```
 或按季度直接指定（不用手算 offset）：
 ```bash
@@ -111,9 +111,20 @@ bash skills/13f-tracker/run.sh --json search --query "hhlr"
 - 常用映射在 `scripts/institution_map.json`
 - 例：`hhlr`, `高瓴` → `0001762304`
 
+## 6) Auto-Learn（新增）
+
+- 默认开启：`--auto-learn true`
+- 每次运行 compare 后：
+  - 命中已有 JSON → 直接使用
+  - 未命中 ticker → fallback 分类并自动写入 `classification.json`
+  - 新机构别名 → 自动写入 `institution_map.json`
+  - 识别到 share class 关系（如 Class A/B）→ 自动补到 `merge_rules.json`
+- 写入审计日志：`skills/13f-tracker/temp/auto_learn_log.jsonl`
+- 若要禁用自动学习：`--auto-learn false`
+
 ---
 
-## 6) Agent Output Rule (very important)
+## 7) Agent Output Rule (very important)
 
 当用户要求固定格式报告时：
 1. 运行 `compare --format cn --json`

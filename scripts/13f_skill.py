@@ -6,6 +6,7 @@ import os
 import re
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
@@ -17,6 +18,8 @@ pd.set_option("display.width", 2000)
 pd.set_option("display.max_colwidth", None)
 
 SCRIPT_DIR = Path(__file__).resolve().parent
+TEMP_DIR = SCRIPT_DIR.parent / "temp"
+AUTO_LEARN_LOG = TEMP_DIR / "auto_learn_log.jsonl"
 
 # ---------------------------------------------------------------------------
 # Identity
@@ -38,6 +41,28 @@ def _load_json(name: str) -> dict:
     return {}
 
 
+def _save_json(name: str, payload: dict):
+    p = SCRIPT_DIR / name
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, p)
+
+
+def _append_auto_learn_log(kind: str, key: str, value: str, source: str, note: str = ""):
+    TEMP_DIR.mkdir(parents=True, exist_ok=True)
+    event = {
+        "ts": datetime.now().isoformat(timespec="seconds"),
+        "kind": kind,
+        "key": key,
+        "value": value,
+        "source": source,
+        "note": note,
+    }
+    with open(AUTO_LEARN_LOG, "a", encoding="utf-8") as f:
+        f.write(json.dumps(event, ensure_ascii=False) + "\n")
+
+
 _CLASSIFICATION = _load_json("classification.json")
 _MERGE_RULES = _load_json("merge_rules.json")
 _INSTITUTION_MAP = _load_json("institution_map.json")
@@ -53,6 +78,86 @@ _BIOTECH_TICKERS = {
     "LEGN", "ONC", "MAZE", "ALGS", "CTKB", "SGMT", "AVBP", "IMAB",
     "GOSS", "CONTINEUM", "ZLAB", "BGNE", "MRNA", "BNTX",
 }
+
+_CHINA_HINTS = [
+    "alibaba", "pdd", "jd", "baidu", "netease", "futu", "beke", "yatsen",
+    "tuya", "uxin", "mogu", "vnet", "agora", "china", "hong kong", "hldg ltd",
+]
+_AI_HINTS = [
+    "semiconductor", "nvidia", "microsoft", "alphabet", "meta", "amazon", "tesla",
+    "software", "cloud", "analytics", "saas", "tsm", "broadcom", "adobe",
+    "artificial intelligence", "machine learning",
+]
+
+
+def _category_key(category: str) -> str:
+    if category == "China Book":
+        return "china_book"
+    if category == "AI/Semi/US SaaS":
+        return "ai_semi_saas"
+    return "other_us_book"
+
+
+def _infer_category_fallback(ticker: str, issuer: str) -> str:
+    t = (ticker or "").upper()
+    text = f"{ticker} {issuer}".lower()
+    if t in _CHINA_TICKERS:
+        return "China Book"
+    if t in _AI_SEMI_TICKERS:
+        return "AI/Semi/US SaaS"
+    if any(h in text for h in _CHINA_HINTS):
+        return "China Book"
+    if any(h in text for h in _AI_HINTS):
+        return "AI/Semi/US SaaS"
+    return "Other US Book"
+
+
+def _learn_classification(ticker: str, category: str, source: str = "fallback"):
+    t = (ticker or "").upper().strip()
+    if not t:
+        return
+    key = _category_key(category)
+    if key not in _CLASSIFICATION:
+        _CLASSIFICATION[key] = []
+    if t in _CLASSIFICATION[key]:
+        return
+    # remove from other buckets first
+    for bucket in ("china_book", "ai_semi_saas", "other_us_book"):
+        if bucket not in _CLASSIFICATION:
+            _CLASSIFICATION[bucket] = []
+        if t in _CLASSIFICATION[bucket]:
+            _CLASSIFICATION[bucket].remove(t)
+    _CLASSIFICATION[key].append(t)
+    _CLASSIFICATION[key] = sorted(set(_CLASSIFICATION[key]))
+    _save_json("classification.json", _CLASSIFICATION)
+    _CHINA_TICKERS.clear(); _CHINA_TICKERS.update(_CLASSIFICATION.get("china_book", []))
+    _AI_SEMI_TICKERS.clear(); _AI_SEMI_TICKERS.update(_CLASSIFICATION.get("ai_semi_saas", []))
+    _append_auto_learn_log("classification", t, category, source)
+
+
+def _learn_institution_alias(alias: str, cik_value: str, source: str = "lookup"):
+    a = (alias or "").strip().lower()
+    if not a or a.isdigit() or a.startswith("_"):
+        return
+    if _INSTITUTION_MAP.get(a) == cik_value:
+        return
+    if a not in _INSTITUTION_MAP:
+        _INSTITUTION_MAP[a] = cik_value
+        _save_json("institution_map.json", _INSTITUTION_MAP)
+        _append_auto_learn_log("institution", a, cik_value, source)
+
+
+def _learn_merge_rule(ticker: str, canonical: str, source: str = "inferred"):
+    t = (ticker or "").upper().strip()
+    c = (canonical or "").strip()
+    if not t or not c:
+        return
+    if _MERGE_RULES.get(t) == c:
+        return
+    if t not in _MERGE_RULES:
+        _MERGE_RULES[t] = c
+        _save_json("merge_rules.json", _MERGE_RULES)
+        _append_auto_learn_log("merge", t, c, source)
 
 
 # ---------------------------------------------------------------------------
@@ -101,21 +206,29 @@ def _retry(fn, max_retries=2, delay=2.0):
 # ---------------------------------------------------------------------------
 # Institution resolution (#7)
 # ---------------------------------------------------------------------------
-def _resolve_institution(identifier: str):
+def _resolve_institution(identifier: str, auto_learn: bool = True):
     """Resolve institution from name/CIK/ticker."""
-    # Check institution map (case-insensitive)
-    mapped = _INSTITUTION_MAP.get(identifier.lower().strip())
+    raw_identifier = (identifier or "").strip()
+    mapped = _INSTITUTION_MAP.get(raw_identifier.lower())
     if mapped:
         identifier = mapped
 
-    # Strip comment key
-    if identifier.startswith("_"):
+    if str(identifier).startswith("_"):
         raise RuntimeError(f"Invalid institution: {identifier}")
 
     try:
-        if identifier.isdigit() or (identifier.startswith("0") and identifier.replace("0", "").isdigit()):
-            return Company(int(identifier))
-        return Company(identifier)
+        if str(identifier).isdigit() or (str(identifier).startswith("0") and str(identifier).replace("0", "").isdigit()):
+            company = Company(int(identifier))
+        else:
+            company = Company(identifier)
+
+        # auto-learn alias -> CIK mapping
+        if auto_learn:
+            cik = str(getattr(company, "cik", "") or "")
+            if cik and raw_identifier and raw_identifier.lower() != cik:
+                _learn_institution_alias(raw_identifier, cik, source="auto")
+
+        return company
     except Exception as e:
         raise RuntimeError(f"Error finding institution '{identifier}': {e}") from e
 
@@ -168,12 +281,11 @@ def _is_biotech(ticker: str, issuer: str) -> bool:
 # ---------------------------------------------------------------------------
 # Classification (#3)
 # ---------------------------------------------------------------------------
-def _classify(ticker: str) -> str:
+def _classify(ticker: str, issuer: str = "", auto_learn: bool = True) -> str:
     t = (ticker or "").upper()
     # Check merge rules first
     canonical = _MERGE_RULES.get(t, _MERGE_RULES.get(ticker, ""))
     if canonical:
-        # Re-check with any ticker that maps to this canonical
         for k, v in _MERGE_RULES.items():
             if v == canonical and k.upper() in _CHINA_TICKERS:
                 return "China Book"
@@ -184,7 +296,12 @@ def _classify(ticker: str) -> str:
         return "China Book"
     if t in _AI_SEMI_TICKERS:
         return "AI/Semi/US SaaS"
-    return "Other US Book"
+
+    # Fallback classifier + auto-learn
+    category = _infer_category_fallback(t, issuer)
+    if auto_learn and t:
+        _learn_classification(t, category, source="auto-fallback")
+    return category
 
 
 # ---------------------------------------------------------------------------
@@ -196,11 +313,12 @@ _SHORT_NAMES = {
     "APPLE INC": "Apple", "NVIDIA CORP": "NVIDIA",
     "TAIWAN SEMICONDUCTOR MFG CO LTD": "TSM",
     "BROADCOM INC": "Broadcom", "TESLA INC": "Tesla",
-    "ALIBABA GROUP HOLDING LTD": "Alibaba",
+    "ALIBABA GROUP HOLDING LTD": "Alibaba", "ALIBABA GROUP HLDG LTD": "Alibaba",
     "PINDUODUO INC": "PDD", "PDD HOLDINGS INC": "PDD",
     "JD COM INC": "JD", "JD.COM INC": "JD",
     "BAIDU INC": "Baidu", "NETEASE INC": "NetEase",
-    "FUTU HOLDINGS LTD": "FUTU", "KE HOLDINGS INC": "BEKE",
+    "FUTU HOLDINGS LTD": "FUTU", "FUTU HLDGS LTD": "FUTU",
+    "KE HOLDINGS INC": "BEKE", "KE HLDGS INC": "BEKE",
     "FULL TRUCK ALLIANCE CO LTD": "YMM",
     "ISHARES BITCOIN TRUST ETF": "IBIT",
 }
@@ -218,14 +336,29 @@ def _short_name(issuer: str, ticker: str) -> str:
     if issuer_upper in _SHORT_NAMES:
         return _SHORT_NAMES[issuer_upper]
 
-    # Fallback: title-case first two words
-    parts = (issuer or "").split()
-    if len(parts) >= 2:
-        name = " ".join(parts[:2]).title()
-        # Remove trailing "Inc", "Corp", "Ltd"
-        name = re.sub(r"\s+(Inc|Corp|Ltd|Plc|Co|Llc)\.?$", "", name, flags=re.IGNORECASE)
-        return name
-    return issuer or ticker or "Unknown"
+    # Fallback: strip common corporate suffixes and noise words
+    raw = (issuer or "").strip()
+    if raw:
+        # Normalize dots and spacing
+        cleaned = re.sub(r"[\.,]", " ", raw)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        tokens = cleaned.split(" ")
+
+        # Remove trailing legal/company suffixes repeatedly
+        strip_set = {
+            "inc", "corp", "corporation", "ltd", "limited", "plc", "co", "company", "llc",
+            "group", "holding", "holdings", "hldg", "hldgs", "sa", "nv", "ag"
+        }
+        while tokens and tokens[-1].lower() in strip_set:
+            tokens.pop()
+
+        # Keep first 2 tokens after cleanup for concise name
+        if tokens:
+            short_tokens = tokens[:2]
+            name = " ".join(short_tokens).title()
+            return name
+
+    return ticker or issuer or "Unknown"
 
 
 # ---------------------------------------------------------------------------
@@ -280,8 +413,27 @@ def _change_template(name: str, value: float, prev_shares: int, chg_shares: int,
 # ---------------------------------------------------------------------------
 # Core: build formatted report (#1)
 # ---------------------------------------------------------------------------
-def _build_report(comparison_rows: list, exclude_biotech: bool = True) -> dict:
+def _build_report(comparison_rows: list, exclude_biotech: bool = True, auto_learn: bool = True) -> dict:
     """Process comparison rows into categorized, formatted report."""
+
+    # Auto-learn merge rules from class share names (safe heuristic)
+    if auto_learn:
+        issuer_groups = {}
+        for row in comparison_rows:
+            ticker = str(row.get("Ticker") or row.get("ticker") or "").upper().strip()
+            issuer = str(row.get("Issuer") or row.get("issuer") or "")
+            if not ticker or not issuer:
+                continue
+            if "class" in issuer.lower():
+                base = re.sub(r"\bclass\s+[a-z0-9]+\b", "", issuer, flags=re.IGNORECASE)
+                base = re.sub(r"\s+", " ", base).strip()
+                issuer_groups.setdefault(base, set()).add(ticker)
+
+        for base, tickers in issuer_groups.items():
+            if len(tickers) >= 2:
+                canonical = _short_name(base, "")
+                for t in tickers:
+                    _learn_merge_rule(t, canonical, source="auto-class-share")
 
     # Step 1: Filter biotech + merge share classes
     merged = {}
@@ -304,7 +456,7 @@ def _build_report(comparison_rows: list, exclude_biotech: bool = True) -> dict:
                 "shares": 0, "value": 0,
                 "prev_shares": 0, "prev_value": 0,
                 "chg_shares": 0,
-                "category": _classify(ticker),
+                "category": _classify(ticker, issuer, auto_learn=auto_learn),
             }
 
         entry = merged[merge_key]
@@ -407,7 +559,7 @@ def _safe_float(v) -> float:
 # Commands
 # ---------------------------------------------------------------------------
 def cmd_summary(args):
-    company = _resolve_institution(args.institution)
+    company = _resolve_institution(args.institution, auto_learn=_auto_learn(args))
     offset = _get_offset(args, company)
     thirteenf = _retry(lambda: company.get_filings(form="13F-HR")[offset].obj())
 
@@ -422,7 +574,7 @@ def cmd_summary(args):
 
 
 def cmd_top(args):
-    company = _resolve_institution(args.institution)
+    company = _resolve_institution(args.institution, auto_learn=_auto_learn(args))
     offset = _get_offset(args, company)
     thirteenf = _retry(lambda: company.get_filings(form="13F-HR")[offset].obj())
     holdings = thirteenf.holdings
@@ -444,7 +596,7 @@ def cmd_top(args):
 
 
 def cmd_compare(args):
-    company = _resolve_institution(args.institution)
+    company = _resolve_institution(args.institution, auto_learn=_auto_learn(args))
     offset = _get_offset(args, company)
     thirteenf = _retry(lambda: company.get_filings(form="13F-HR")[offset].obj())
     comparison = _retry(lambda: thirteenf.compare_holdings())
@@ -468,17 +620,19 @@ def cmd_compare(args):
         "offset": offset,
         "manager": thirteenf.management_company_name,
         "base_period": str(thirteenf.report_period),
+        "auto_learn": _auto_learn(args),
         "rows": rows,
         "raw_text": str(comparison),
     }
 
-    # Auto-format if requested (#1)
-    if args.format == "cn" and rows:
-        report = _build_report(rows, exclude_biotech=not args.include_biotech)
-        result["formatted_report"] = report["report_text"]
-        result["categories"] = report["categories"]
-        result["total_positions"] = report["total_positions"]
-        result["filtered_biotech"] = report["filtered_biotech"]
+    # Build report (also triggers auto-learn), only expose formatted text in cn mode
+    if rows and (args.format == "cn" or _auto_learn(args)):
+        report = _build_report(rows, exclude_biotech=not args.include_biotech, auto_learn=_auto_learn(args))
+        if args.format == "cn":
+            result["formatted_report"] = report["report_text"]
+            result["categories"] = report["categories"]
+            result["total_positions"] = report["total_positions"]
+            result["filtered_biotech"] = report["filtered_biotech"]
 
     _emit(result, args.json)
 
@@ -508,7 +662,7 @@ def cmd_self_test(args):
     checks.append({"name": "institution_map.json", "ok": bool(_INSTITUTION_MAP)})
 
     try:
-        company = _resolve_institution(args.institution)
+        company = _resolve_institution(args.institution, auto_learn=False)
         checks.append({"name": "institution.lookup", "ok": True})
         thirteenf = _retry(lambda: company.get_filings(form="13F-HR")[0].obj())
         checks.append({"name": "13f.latest", "ok": True, "period": str(thirteenf.report_period)})
@@ -517,6 +671,13 @@ def cmd_self_test(args):
 
     ok = all(c.get("ok") for c in checks)
     _emit({"ok": ok, "checks": checks}, args.json)
+
+
+def _auto_learn(args) -> bool:
+    val = getattr(args, "auto_learn", "true")
+    if isinstance(val, bool):
+        return val
+    return str(val).strip().lower() in ("1", "true", "yes", "on")
 
 
 def _get_offset(args, company=None) -> int:
@@ -544,6 +705,8 @@ def main():
                         help="0=latest quarter, 1=previous, etc.")
     parent.add_argument("--quarter", type=str, default="",
                         help="Quarter string e.g. '25Q4', '2025Q3' (alternative to --offset)")
+    parent.add_argument("--auto-learn", choices=["true", "false"], default="true",
+                        help="Auto-update classification/institution/merge json when new info appears (default: true)")
 
     # summary
     p = sub.add_parser("summary", parents=[parent])
