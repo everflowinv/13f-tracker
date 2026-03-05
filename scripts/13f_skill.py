@@ -170,6 +170,7 @@ _INSTITUTION_MAP = _load_json("institution_map.json")
 
 _CHINA_TICKERS = set(_CLASSIFICATION.get("china_book", []))
 _AI_SEMI_TICKERS = set(_CLASSIFICATION.get("ai_semi_saas", []))
+_OTHER_US_TICKERS = set(_CLASSIFICATION.get("other_us_book", []))
 
 _BIOTECH_KEYWORDS = [
     "bio", "therapeutics", "pharma", "medicines", "life sciences",
@@ -202,6 +203,9 @@ def _category_key(category: str) -> str:
 def _infer_category_fallback(ticker: str, issuer: str) -> str:
     t = (ticker or "").upper()
     text = f"{ticker} {issuer}".lower()
+    # Explicit list takes priority — check Other US first to override AI/Semi defaults
+    if t in _OTHER_US_TICKERS:
+        return "Other US Book"
     if t in _CHINA_TICKERS:
         return "China Book"
     if t in _AI_SEMI_TICKERS:
@@ -233,6 +237,7 @@ def _learn_classification(ticker: str, category: str, source: str = "fallback"):
     _save_json("classification.json", _CLASSIFICATION)
     _CHINA_TICKERS.clear(); _CHINA_TICKERS.update(_CLASSIFICATION.get("china_book", []))
     _AI_SEMI_TICKERS.clear(); _AI_SEMI_TICKERS.update(_CLASSIFICATION.get("ai_semi_saas", []))
+    _OTHER_US_TICKERS.clear(); _OTHER_US_TICKERS.update(_CLASSIFICATION.get("other_us_book", []))
     _append_auto_learn_log("classification", t, category, source)
 
 
@@ -558,8 +563,17 @@ def _extract_actions(comparison_rows: list, exclude_biotech: bool = True) -> dic
         issuer = str(row.get("Issuer") or row.get("issuer") or "")
         if exclude_biotech and _is_biotech(ticker, issuer):
             continue
+        # CB detection (must mirror _build_report logic)
+        cusip = str(row.get("Cusip") or row.get("cusip") or "").strip()
+        instrument = "equity"
+        if len(cusip) >= 8:
+            issue_chars = cusip[6:8]
+            if any(c.isalpha() for c in issue_chars):
+                instrument = "cb"
         canonical = _MERGE_RULES.get(ticker)
         merge_key = canonical or _short_name(issuer, ticker)
+        if instrument == "cb":
+            merge_key = merge_key + " CB"
         if merge_key not in merged:
             merged[merge_key] = {"shares": 0, "prev_shares": 0, "chg_shares": 0}
         entry = merged[merge_key]
@@ -567,11 +581,15 @@ def _extract_actions(comparison_rows: list, exclude_biotech: bool = True) -> dic
         chg = _safe_int(row.get("ShareChange") or row.get("Chg") or row.get("chg") or row.get("Change") or 0)
         entry["shares"] += shares
         entry["chg_shares"] += chg
-        prev_explicit = _safe_int(row.get("PrevShares") or row.get("Prev Shares") or row.get("prev_shares") or 0)
-        if prev_explicit > 0:
-            entry["prev_shares"] += prev_explicit
-        elif shares > 0 or chg != 0:
-            entry["prev_shares"] += max(0, shares - chg)
+        status = str(row.get("Status") or "").upper().strip()
+        if status == "NEW":
+            pass  # NEW position: prev_shares stays 0
+        else:
+            prev_explicit = _safe_int(row.get("PrevShares") or row.get("Prev Shares") or row.get("prev_shares") or 0)
+            if prev_explicit > 0:
+                entry["prev_shares"] += prev_explicit
+            elif shares > 0 or chg != 0:
+                entry["prev_shares"] += max(0, shares - chg)
 
     result = {}
     for key, e in merged.items():
@@ -615,9 +633,19 @@ def _build_report(comparison_rows: list, exclude_biotech: bool = True, auto_lear
         if exclude_biotech and _is_biotech(ticker, issuer):
             continue
 
-        # Determine merge key
+        # Detect instrument type from CUSIP (issue number = chars 7-8)
+        cusip = str(row.get("Cusip") or row.get("cusip") or "").strip()
+        instrument = "equity"
+        if len(cusip) >= 8:
+            issue_chars = cusip[6:8]
+            if any(c.isalpha() for c in issue_chars):
+                instrument = "cb"  # convertible bond / note
+
+        # Determine merge key — keep CB separate from equity
         canonical = _MERGE_RULES.get(ticker)
         merge_key = canonical or _short_name(issuer, ticker)
+        if instrument == "cb":
+            merge_key = merge_key + " CB"
 
         if merge_key not in merged:
             merged[merge_key] = {
