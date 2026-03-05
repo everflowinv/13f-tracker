@@ -100,16 +100,16 @@ def _parse_map_instruction(instruction: str) -> list:
 
     chunks = [c.strip() for c in re.split(r"[;；\n]+", text) if c.strip()]
     for ch in chunks:
-        # classify move: 把 XYZ 从 A 改到 B
-        m = re.search(r"把\s*([A-Za-z\.\-]{1,12})\s*从\s*(.+?)\s*改到\s*(.+)$", ch, re.IGNORECASE)
+        # classify move: 把 XYZ 从 A 改到 B  (ticker only, max 6 chars)
+        m = re.search(r"把\s*([A-Za-z\.\-]{1,6})\s*从\s*(.+?)\s*改到\s*(.+)$", ch, re.IGNORECASE)
         if m:
             ticker = m.group(1).upper()
             to_cat = _canon_category(m.group(3))
             ops.append({"type": "classification", "ticker": ticker, "category": to_cat, "raw": ch})
             continue
 
-        # classify set: XYZ 分类到 B / 归类到 B / 放到 B
-        m = re.search(r"([A-Za-z\.\-]{1,12})\s*(?:分类到|归类到|放到|属于)\s*(.+)$", ch, re.IGNORECASE)
+        # classify set: XYZ 分类到 B / 归类到 B / 放到 B  (ticker only, max 6 chars)
+        m = re.search(r"([A-Za-z\.\-]{1,6})\s*(?:分类到|归类到|放到|属于)\s*(.+)$", ch, re.IGNORECASE)
         if m:
             ticker = m.group(1).upper()
             cat = _canon_category(m.group(2))
@@ -203,13 +203,12 @@ def _category_key(category: str) -> str:
 def _infer_category_fallback(ticker: str, issuer: str) -> str:
     t = (ticker or "").upper()
     text = f"{ticker} {issuer}".lower()
-    # Explicit list takes priority — check Other US first to override AI/Semi defaults
-    if t in _OTHER_US_TICKERS:
-        return "Other US Book"
     if t in _CHINA_TICKERS:
         return "China Book"
     if t in _AI_SEMI_TICKERS:
         return "AI/Semi/US SaaS"
+    if t in _OTHER_US_TICKERS:
+        return "Other US Book"
     if any(h in text for h in _CHINA_HINTS):
         return "China Book"
     if any(h in text for h in _AI_HINTS):
@@ -217,9 +216,18 @@ def _infer_category_fallback(ticker: str, issuer: str) -> str:
     return "Other US Book"
 
 
+def _is_valid_ticker(s: str) -> bool:
+    """Check if string looks like a valid US ticker (1-6 uppercase letters, optional dot/dash suffix)."""
+    return bool(re.match(r"^[A-Z]{1,6}(?:[.\-][A-Z]{1,2})?$", s))
+
+
 def _learn_classification(ticker: str, category: str, source: str = "fallback"):
     t = (ticker or "").upper().strip()
     if not t:
+        return
+    if not _is_valid_ticker(t):
+        print(f"WARNING: Rejected classification entry '{t}' — not a valid ticker format. "
+              f"Use ticker symbols (e.g. 'DASH' not 'DOORDASH').", file=sys.stderr)
         return
     key = _category_key(category)
     if key not in _CLASSIFICATION:
@@ -602,7 +610,7 @@ def _extract_actions(comparison_rows: list, exclude_biotech: bool = True) -> dic
 # Core: build formatted report (#1)
 # ---------------------------------------------------------------------------
 def _build_report(comparison_rows: list, exclude_biotech: bool = True, auto_learn: bool = True,
-                   prior_actions: dict | None = None, prev_quarter_label: str = "") -> dict:
+                   prior_actions=None, prev_quarter_label: str = "") -> dict:
     """Process comparison rows into categorized, formatted report."""
 
     # Auto-learn merge rules from class share names (safe heuristic)
