@@ -480,16 +480,18 @@ def _short_name(issuer: str, ticker: str) -> str:
 # Value formatting (#1 Step 3)
 # ---------------------------------------------------------------------------
 def _format_value(value: float) -> str:
-    """Format value in Chinese convention. Value is in actual USD."""
-    if value >= 100_000_000:
-        yi = value / 100_000_000
+    """Format value in Chinese convention. SEC 13F Value is in $1,000 units."""
+    # Convert from SEC $1,000 units to actual USD
+    actual = value * 1000
+    if actual >= 100_000_000:
+        yi = actual / 100_000_000
         return f"{yi:.1f}亿美元"
     else:
-        wan = round(value / 10_000)
+        wan = round(actual / 10_000)
         # Round to nearest hundred wan
         wan = round(wan / 100) * 100
         # Avoid 0 for non-zero positions
-        if value > 0 and wan == 0:
+        if actual > 0 and wan == 0:
             wan = 100
         return f"{wan}万美元"
 
