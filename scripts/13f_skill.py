@@ -167,6 +167,7 @@ def _apply_ops(ops: list, source: str = "manual") -> list:
 _CLASSIFICATION = _load_json("classification.json")
 _MERGE_RULES = _load_json("merge_rules.json")
 _INSTITUTION_MAP = _load_json("institution_map.json")
+_NAME_TO_TICKER = _load_json("name_to_ticker.json")  # reverse lookup: uppercase name/issuer -> ticker
 
 _CHINA_TICKERS = set(_CLASSIFICATION.get("china_book", []))
 _AI_SEMI_TICKERS = set(_CLASSIFICATION.get("ai_semi_saas", []))
@@ -216,18 +217,60 @@ def _infer_category_fallback(ticker: str, issuer: str) -> str:
     return "Other US Book"
 
 
+def _learn_name_to_ticker(ticker: str, issuer: str, short_name: str = ""):
+    """Record name->ticker mappings from SEC data for reverse lookup."""
+    t = (ticker or "").upper().strip()
+    if not t or len(t) > 6 or t == "NAN":
+        return
+    if not _is_valid_ticker(t):
+        return
+    changed = False
+    for name in (issuer, short_name):
+        key = (name or "").upper().strip()
+        if key and key != t and len(key) > 1:
+            if _NAME_TO_TICKER.get(key) != t:
+                _NAME_TO_TICKER[key] = t
+                changed = True
+    if changed:
+        _save_json("name_to_ticker.json", _NAME_TO_TICKER)
+
+
+def _resolve_ticker(input_str: str) -> str:
+    """Resolve a company name or ticker to the canonical SEC ticker.
+    Returns the resolved ticker (uppercase), or the original input if no match found."""
+    s = (input_str or "").upper().strip()
+    if not s:
+        return s
+    # Already a known ticker?
+    known = _CHINA_TICKERS | _AI_SEMI_TICKERS | _OTHER_US_TICKERS
+    if s in known:
+        return s
+    # Try reverse lookup
+    if s in _NAME_TO_TICKER:
+        return _NAME_TO_TICKER[s]
+    # Try partial match (input is substring of a known name)
+    candidates = [(k, v) for k, v in _NAME_TO_TICKER.items() if s in k]
+    if len(candidates) == 1:
+        return candidates[0][1]
+    return s
+
+
 def _is_valid_ticker(s: str) -> bool:
     """Check if string looks like a valid US ticker (1-6 uppercase letters, optional dot/dash suffix)."""
     return bool(re.match(r"^[A-Z]{1,6}(?:[.\-][A-Z]{1,2})?$", s))
 
 
 def _learn_classification(ticker: str, category: str, source: str = "fallback"):
-    t = (ticker or "").upper().strip()
-    if not t:
+    raw = (ticker or "").upper().strip()
+    if not raw:
         return
+    # Auto-resolve company names to SEC tickers (e.g. "DOORDASH" -> "DASH")
+    t = _resolve_ticker(raw)
+    if t != raw:
+        print(f"INFO: Resolved '{raw}' → '{t}' (SEC ticker)", file=sys.stderr)
     if not _is_valid_ticker(t):
-        print(f"WARNING: Rejected classification entry '{t}' — not a valid ticker format. "
-              f"Use ticker symbols (e.g. 'DASH' not 'DOORDASH').", file=sys.stderr)
+        print(f"WARNING: Rejected classification entry '{raw}' — could not resolve to a valid ticker. "
+              f"Run 'compare' first to populate the name→ticker lookup.", file=sys.stderr)
         return
     # For manual/external sources, only accept tickers already seen in SEC data
     known = _CHINA_TICKERS | _AI_SEMI_TICKERS | _OTHER_US_TICKERS
@@ -658,9 +701,14 @@ def _build_report(comparison_rows: list, exclude_biotech: bool = True, auto_lear
 
         # Determine merge key — keep CB separate from equity
         canonical = _MERGE_RULES.get(ticker)
-        merge_key = canonical or _short_name(issuer, ticker)
+        short = _short_name(issuer, ticker)
+        merge_key = canonical or short
         if instrument == "cb":
             merge_key = merge_key + " CB"
+
+        # Learn name→ticker reverse mapping from SEC data
+        if ticker and auto_learn:
+            _learn_name_to_ticker(ticker, issuer, short)
 
         if merge_key not in merged:
             merged[merge_key] = {
