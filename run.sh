@@ -35,5 +35,5 @@ if [ ! -d "$DIR/venv" ]; then
     echo "✅ Setup complete!"
 fi
 
-# 3. 使用专属虚拟环境执行 Python 脚本
-"$DIR/venv/bin/python" "$DIR/scripts/13f_skill.py" "$@"
+# 3. 使用专属虚拟环境执行 Python 脚本（抑制非关键 warning，避免污染 JSON）
+"$DIR/venv/bin/python" -W ignore "$DIR/scripts/13f_skill.py" "$@"

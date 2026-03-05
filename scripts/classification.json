@@ -1,0 +1,21 @@
+{
+  "_comment": "ticker → category mapping. Unknown tickers default to 'Other US Book'.",
+  "china_book": [
+    "BABA", "PDD", "FUTU", "BEKE", "YSG", "YMM", "NTES", "BIDU",
+    "UXIN", "MOGU", "TUYA", "API", "VNET", "BULL", "JD", "LI",
+    "NIO", "XPEV", "BILI", "IQ", "ZTO", "MNSO", "HTHT", "TCOM",
+    "BZUN", "DADA", "DDL", "DOYU", "HUYA", "KC", "LKNCY", "TAL",
+    "TME", "WB", "YUMC", "ZH", "QFIN", "FINV", "LX", "GDS",
+    "ATHM", "TIGR", "UP", "GOTU", "ZLAB", "BZ", "CPNG"
+  ],
+  "ai_semi_saas": [
+    "GOOGL", "GOOG", "TSM", "AMZN", "META", "MSFT", "NVDA",
+    "AAPL", "CWAN", "AVGO", "AMD", "INTC", "QCOM", "MRVL",
+    "ASML", "LRCX", "AMAT", "KLAC", "SNPS", "CDNS", "ARM",
+    "MU", "ON", "MCHP", "TXN", "ADI", "NXPI", "CRM", "NOW",
+    "SNOW", "PLTR", "DDOG", "NET", "CRWD", "ZS", "PANW",
+    "FTNT", "TEAM", "MDB", "OKTA", "HUBS", "WDAY", "VEEV",
+    "ADBE", "ORCL", "SAP", "UBER", "DASH", "ABNB", "SHOP",
+    "SQ", "COIN", "HOOD", "SMCI", "DELL", "AI", "SOUN", "IONQ"
+  ]
+}

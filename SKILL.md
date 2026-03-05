@@ -1,95 +1,122 @@
 ---
 name: 13f-tracker
-description: Fetches SEC 13F institutional holdings and formats them into a specific categorized narrative report.
+description: Fetches SEC 13F institutional holdings and outputs a fixed-format categorized narrative report (China Book / AI-Semi-US SaaS / Other US Book), with deterministic filtering/merging/formatting.
 ---
-# 13F Holdings Analyzer Skill
 
-## Setup & Installation
+# 13F Holdings Analyzer Skill v2
 
-⚠️ **CRITICAL: Installation Location**
-Do NOT install this skill in the global `node_modules` directory. You MUST clone/install it directly into your local OpenClaw workspace:
-1. Navigate to your workspace: `cd ~/.openclaw/workspace/skills/`
-2. Clone this repository: `git clone git@github.com:everflowinv/13f-tracker.git`
+⚠️ **CRITICAL: 必须通过 `run.sh` 调用，不要自己写 Python 抓取。**
+⚠️ **CRITICAL: 固定格式输出由代码生成，agent 不要改写模板措辞。**
 
-**Configuration:**
-Set your SEC Edgar identity (Required by SEC API to avoid rate limits/bans):
-`export EDGAR_IDENTITY="Your Name <your.email@example.com>"`
-
-**That's it!** You do NOT need to manually install dependencies. The skill is fully auto-bootstrapping. The first time the Agent executes the `run.sh` command, it will automatically create an isolated virtual environment and install everything needed.
-
-## When to use this skill
-Use this skill when a user asks about the stock portfolio changes, quarter-over-quarter comparisons, or specific holdings of an institutional investor.
-
-## How to use this skill
-⚠️ **AGENT INSTRUCTION: DO NOT write or execute your own Python code to fetch data.** You MUST use `run.sh` only.
-
-### 0) Health check first (mandatory)
+## 0) Setup
 ```bash
-bash skills/13f-tracker/run.sh self-test --institution 0001067983
+export EDGAR_IDENTITY="Your Name <your.email@example.com>"
+```
+首次运行会自动创建 `venv` 并安装依赖。
+
+---
+
+## 1) Health Check (mandatory)
+```bash
 bash skills/13f-tracker/run.sh --json self-test --institution 0001067983
 ```
 
-### 1) Fetch data (raw text mode)
+---
+
+## 2) Core Usage
+
+### A) 固定格式报告（推荐）
 ```bash
-bash skills/13f-tracker/run.sh compare --institution 0001762304 --offset 0
+bash skills/13f-tracker/run.sh --json compare --institution 0001762304 --offset 0 --format cn
+```
+或按季度直接指定（不用手算 offset）：
+```bash
+bash skills/13f-tracker/run.sh --json compare --institution 0001762304 --quarter 25Q4 --format cn
 ```
 
-### 2) Fetch data (JSON mode, preferred for deterministic parsing)
+### B) 原始数据模式
 ```bash
-bash skills/13f-tracker/run.sh --json compare --institution 0001762304 --offset 0
+bash skills/13f-tracker/run.sh --json compare --institution 0001762304 --offset 0 --format raw
 ```
-Then process the output EXACTLY according to the analytical steps below.
 
-### Argument Mapping Rules
-- `--institution`: You MUST extract the institution's identifier. For non-public funds (like HHLR Advisors), proactively search for and use their CIK number. For public companies, use the Ticker.
-- `--offset`: An integer representing how many quarters to go back from the MOST RECENTLY filed 13F report. 
-  - The script fetches reports in reverse chronological order.
-  - `0` = The latest available quarter (e.g., typically 25Q4 if we are in early 2026).
-  - `1` = One quarter ago (e.g., 25Q3).
-  - `2` = Two quarters ago (e.g., 25Q2), and so on.
-  - *Calculation Rule:* Identify the "base quarter" the user wants to analyze. Calculate how many quarters ago that was compared to the latest available quarter, and use that integer as the `--offset`. (Note: The `compare` command automatically compares the base quarter with its immediate preceding quarter).
+### C) 其他命令
+```bash
+bash skills/13f-tracker/run.sh --json summary --institution 0001762304 --offset 0
+bash skills/13f-tracker/run.sh --json top --institution 0001762304 --offset 0 --limit 10
+bash skills/13f-tracker/run.sh --json search --query "hhlr"
+```
 
-### ⚠️ CRITICAL ANALYTICAL INSTRUCTIONS ⚠️
-Act as an elite, highly disciplined data analyst. You MUST process the raw tabular data EXACTLY according to these 5 steps. Do NOT hallucinate data, and do NOT skip steps.
+---
 
-**Step 1: STRICT Biotech Exclusion & Merge**
-- **Hard Filter**: You MUST strictly REMOVE any company with names containing: "Bio", "Therapeutics", "Pharma", "Medicines", "Life Sciences", "Genomics", "Oncology", or known biotech tickers (e.g., LEGN, ONC, MAZE, ALGS, CTKB, SGMT, AVBP, IMAB, GOSS, CONTINEUM). DO NOT include them in the final output under any circumstances.
-- **Merge**: If a company has multiple share classes (e.g., Alphabet GOOG and GOOGL), merge them into a single entity. Sum their Shares and Values before calculating.
+## 3) What is now deterministic (code-level, not prompt-level)
 
-**Step 2: Absolute Categorization Rules**
-Classify the remaining companies strictly into these 3 categories:
-1. **China Book**: Any company headquartered or primarily operating in China (e.g., BABA, PDD, FUTU, BEKE, YSG, YMM, NTES, BIDU, UXIN, MOGU, TUYA, API, VNET, BULL).
-2. **AI/Semi/US SaaS**: Tech giants, Artificial Intelligence, Semiconductors, and US Software (e.g., Alphabet/GOOGL, TSM, Amazon, Meta, Microsoft, CWAN).
-3. **Other US Book**: All other companies that do not fit the above two (e.g., MCO, GE, B, EQX, IBIT, CAIFY).
+1. **Biotech exclusion (default ON)**
+   - 自动过滤 Bio/Therapeutics/Pharma/Genomics/Oncology 等关键词与已知 biotech tickers
+   - 若要关闭过滤：`--include-biotech`
 
-**Step 3: Value Parsing & Formatting (CRITICAL MATH)**
-IGNORE the "($K)" in the table header. The numbers like `$795,980,117` are the **EXACT ACTUAL DOLLAR AMOUNTS** (e.g., 795 Million Dollars). Strip the `$` and `,`, convert the raw number to millions (M), and apply this exact formatting:
-- If Value >= 100,000,000 (100M): Format as `X.X亿美元` (Keep 1 decimal place. e.g., $795,980,117 -> 8.0亿美元).
-- If Value < 100,000,000 (100M): Round to the nearest whole million and format as `XX00万美元` (e.g., $46,422,673 -> 4600万美元; $2,284,900 -> 200万美元).
+2. **Share-class merge**
+   - 自动合并 GOOG+GOOGL → Alphabet, BRK.A+BRK.B → Berkshire Hathaway 等（见 `merge_rules.json`）
 
-**Step 4: Strict Natural Language Templates**
-Calculate change percentage: `(Chg / Prev Shares) * 100`, rounded to the nearest integer.
-You are strictly FORBIDDEN from inventing new phrases (Do NOT use "大幅减仓"). Use EXACTLY these templates:
-- New Position: `建仓[Company]，[Value]`
-- Closed Position: `清仓[Company]（之前持仓[Prev Value]）`
-- Increased > 50%: `大幅加仓[Company] [Chg%]%至[Value]`
-- Increased <= 50%: `加仓[Company] [Chg%]%至[Value]`
-- Decreased (Any %): `减仓[Company] [Chg%]%至[Value]`
-- Unchanged: `[Company]仓位不变，[Value]` (Ensure the company name comes FIRST).
-*(Use short names: "Amazon" not "AMAZON COM INC", "Alphabet" not "ALPHABET INC".)*
+3. **Category classification**
+   - 自动归类到：`China Book` / `AI/Semi/US SaaS` / `Other US Book`
+   - 映射表在 `scripts/classification.json`
 
-**Step 5: Sorting & Final Output formatting**
-- Group exactly by: `China Book`, `AI/Semi/US SaaS`, `Other US Book`.
-- Under each group, sort ACTIVE positions descending by their CURRENT Value.
-- Place all CLOSED (清仓) positions at the very bottom of that group.
-- OUTPUT ONLY THE FINAL TEXT REPORT. Do not output your thinking process, do not apologize, do not explain your math.
+4. **Value formatting**
+   - `>=100M` → `X.X亿美元`
+   - `<100M` → `XX00万美元`（四舍五入到百万级）
 
-### Output Discipline (Mandatory, low-intelligence-safe)
-- Never invent institution mapping, holdings, or percentages.
-- If command returns error/hint, surface it directly and stop.
-- Prefer `--json` output for downstream parsing whenever possible.
-- In final narrative, only use values that appear in tool output.
+5. **Strict Chinese templates**
+   - 建仓 / 清仓 / 大幅加仓 / 加仓 / 减仓 / 仓位不变
+   - 不依赖模型自由发挥
 
-### Execution Example
-User: "对比一下HHLR Advisors 25Q4和25Q3的持仓"
-Action: Run `bash skills/13f-tracker/run.sh compare --institution 0001762304 --offset 0` (Assuming 25Q4 is the latest available quarter, making the base offset 0).
+6. **Sorting discipline**
+   - 各组内按当前 Value 降序
+   - 清仓放该组最后
+
+---
+
+## 4) JSON Output Contract
+
+### compare --format cn
+```json
+{
+  "ok": true,
+  "institution": "0001762304",
+  "offset": 0,
+  "manager": "...",
+  "base_period": "2025-12-31",
+  "rows": [...],
+  "raw_text": "...",
+  "formatted_report": "**China Book**\n- ...",
+  "categories": {
+    "China Book": ["..."],
+    "AI/Semi/US SaaS": ["..."],
+    "Other US Book": ["..."]
+  },
+  "total_positions": 18,
+  "filtered_biotech": 4
+}
+```
+
+### Error
+```json
+{"ok": false, "error": "...", "hint": "..."}
+```
+
+---
+
+## 5) Institution Mapping
+
+- 支持 CIK / Ticker / 机构名（大小写不敏感）
+- 常用映射在 `scripts/institution_map.json`
+- 例：`hhlr`, `高瓴` → `0001762304`
+
+---
+
+## 6) Agent Output Rule (very important)
+
+当用户要求固定格式报告时：
+1. 运行 `compare --format cn --json`
+2. 直接使用 `formatted_report` 字段作为最终正文（可加 1 行上下文，不改模板）
+3. 不要重新计算百分比，不要改动措辞
+4. 若 `ok=false`，原样返回 `error + hint`
